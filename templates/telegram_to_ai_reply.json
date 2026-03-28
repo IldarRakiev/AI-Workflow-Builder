@@ -1,0 +1,76 @@
+{
+  "name": "Telegram → AI Reply",
+  "nodes": [
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000001",
+      "name": "Telegram Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "b2c3d4e5-0002-0002-0002-000000000099",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "telegram-{{BOT_TOKEN}}",
+        "responseMode": "onReceived",
+        "responseData": "allEntries"
+      }
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000002",
+      "name": "Call AI API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [500, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "{{AI_API_URL}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Authorization", "value": "Bearer {{AI_API_KEY}}"},
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "model": "{{AI_MODEL}}",
+          "messages": [
+            {"role": "user", "content": "={{ $json.body.message.text }}"}
+          ]
+        }
+      }
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000003",
+      "name": "Send Telegram Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [750, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/bot{{BOT_TOKEN}}/sendMessage",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "chat_id": "{{CHAT_ID}}",
+          "text": "={{ $json.choices[0].message.content }}"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Webhook": {
+      "main": [
+        [{"node": "Call AI API", "type": "main", "index": 0}]
+      ]
+    },
+    "Call AI API": {
+      "main": [
+        [{"node": "Send Telegram Reply", "type": "main", "index": 0}]
+      ]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateId": "telegram_to_ai_reply"}
+}

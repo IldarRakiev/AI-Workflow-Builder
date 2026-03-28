@@ -1,0 +1,54 @@
+{
+  "name": "Telegram → Google Sheets",
+  "nodes": [
+    {
+      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "name": "Telegram Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "a1b2c3d4-0001-0001-0001-000000000099",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "telegram-{{BOT_TOKEN}}",
+        "responseMode": "onReceived",
+        "responseData": "allEntries"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0001-0001-0001-000000000002",
+      "name": "Append to Google Sheets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [500, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://sheets.googleapis.com/v4/spreadsheets/{{SHEET_ID}}/values/{{SHEET_NAME}}!A1:append?valueInputOption=USER_ENTERED",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "values": [
+            [
+              "={{ $json.body.message.message_id }}",
+              "={{ $json.body.message.from.id }}",
+              "={{ $json.body.message.from.username }}",
+              "={{ $json.body.message.text }}",
+              "={{ new Date($json.body.message.date * 1000).toISOString() }}"
+            ]
+          ]
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Webhook": {
+      "main": [
+        [{"node": "Append to Google Sheets", "type": "main", "index": 0}]
+      ]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateId": "telegram_to_sheets"}
+}

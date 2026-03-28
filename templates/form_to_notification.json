@@ -1,0 +1,45 @@
+{
+  "name": "Form → Telegram Notification",
+  "nodes": [
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000001",
+      "name": "Form Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "c3d4e5f6-0003-0003-0003-000000000099",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "{{WEBHOOK_PATH}}",
+        "responseMode": "onReceived",
+        "responseData": "allEntries"
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000002",
+      "name": "Send Telegram Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [500, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/bot{{BOT_TOKEN}}/sendMessage",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "chat_id": "{{CHAT_ID}}",
+          "text": "=📋 Новая заявка!\n\n{{ Object.entries($json.body).map(([k,v]) => `${k}: ${v}`).join('\\n') }}"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Form Webhook": {
+      "main": [
+        [{"node": "Send Telegram Notification", "type": "main", "index": 0}]
+      ]
+    }
+  },
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateId": "form_to_notification"}
+}
