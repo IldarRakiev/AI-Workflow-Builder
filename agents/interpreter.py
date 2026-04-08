@@ -44,14 +44,14 @@ class InterpreterResult(TypedDict):
 _FALLBACK_SUMMARY = "Не удалось разобрать задачу, попробуй описать подробнее."
 
 
-async def extract(user_message: str, history: list[dict] | None = None) -> InterpreterResult:
+async def extract(user_message: str, history: list[dict] | None = None, ask_kwargs: dict = {}) -> InterpreterResult:
     """Extract automation task structure from user message."""
     # Use last 6 history entries (3 exchanges) — automation intent often spans turns
     recent = list(history[-6:]) if history else []
     recent.append({"role": "user", "content": user_message})
 
     try:
-        raw = await ask(recent, system=SYSTEM_PROMPT)
+        raw = await ask(recent, system=SYSTEM_PROMPT, **ask_kwargs)
         data = parse_json_response(raw)
 
         task: TaskStructure = {

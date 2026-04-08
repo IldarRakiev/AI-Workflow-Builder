@@ -129,12 +129,12 @@ _FALLBACK: BuilderResult = {
 }
 
 
-async def generate(task: TaskStructure, user_message: str = "") -> BuilderResult:
+async def generate(task: TaskStructure, user_message: str = "", ask_kwargs: dict = {}) -> BuilderResult:
     """Select a template and fill it with task data. Returns BuilderResult."""
     try:
         template_id = _score_templates(task)
         if template_id is None:
-            template_id = await _select_template_llm(task)
+            template_id = await _select_template_llm(task, ask_kwargs=ask_kwargs)
 
         if template_id == "none" or template_id not in TEMPLATE_METADATA:
             workflow_json = _build_custom_stub(task)
@@ -160,7 +160,7 @@ async def generate(task: TaskStructure, user_message: str = "") -> BuilderResult
         # LLM filling for remaining placeholders
         remaining = [p for p in placeholders if p not in fills]
         if remaining:
-            llm_fills = await _fill_llm(remaining, task, user_message)
+            llm_fills = await _fill_llm(remaining, task, user_message, ask_kwargs=ask_kwargs)
             fills.update(llm_fills)
 
         # Mark still-unfilled as PENDING
@@ -205,11 +205,11 @@ def _score_templates(task: TaskStructure) -> str | None:
     return None
 
 
-async def _select_template_llm(task: TaskStructure) -> str:
+async def _select_template_llm(task: TaskStructure, ask_kwargs: dict = {}) -> str:
     """Ask LLM to select the best template. Returns template_id or 'none'."""
     messages = [{"role": "user", "content": json.dumps({"task": task}, ensure_ascii=False)}]
     try:
-        raw = await ask(messages, system=SYSTEM_PROMPT_SELECT)
+        raw = await ask(messages, system=SYSTEM_PROMPT_SELECT, **ask_kwargs)
         data = parse_json_response(raw)
         chosen = data.get("template_id", "none")
         if chosen not in {*TEMPLATE_METADATA.keys(), "none"}:
@@ -248,7 +248,7 @@ def _fill_rule_based(placeholders: list[str], task: TaskStructure, template_id: 
     return fills
 
 
-async def _fill_llm(remaining: list[str], task: TaskStructure, user_message: str) -> dict[str, str]:
+async def _fill_llm(remaining: list[str], task: TaskStructure, user_message: str, ask_kwargs: dict = {}) -> dict[str, str]:
     """Ask LLM to fill in remaining placeholders from context."""
     prompt = (
         f"Task description: {user_message}\n\n"
@@ -257,7 +257,7 @@ async def _fill_llm(remaining: list[str], task: TaskStructure, user_message: str
     )
     messages = [{"role": "user", "content": prompt}]
     try:
-        raw = await ask(messages, system=SYSTEM_PROMPT_FILL)
+        raw = await ask(messages, system=SYSTEM_PROMPT_FILL, **ask_kwargs)
         data = parse_json_response(raw)
         return {k: v for k, v in data.items() if k in remaining and v and v != "PENDING"}
     except Exception as e:

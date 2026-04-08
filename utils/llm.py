@@ -38,17 +38,30 @@ def parse_json_response(raw: str) -> dict:
     raise ValueError(f"Could not parse JSON from LLM response: {raw[:200]!r}")
 
 
-async def ask(messages: list[dict], system: str = "") -> str:
-    """Send messages to the configured LLM and return the assistant's text reply."""
-    if LLM_PROVIDER == "openrouter":
-        return await _ask_openrouter(messages, system)
-    elif LLM_PROVIDER == "anthropic":
-        return await _ask_anthropic(messages, system)
+async def ask(
+    messages: list[dict],
+    system: str = "",
+    *,
+    model_override: str | None = None,
+    provider_override: str | None = None,
+) -> str:
+    """Send messages to the configured LLM and return the assistant's text reply.
+
+    model_override / provider_override let callers switch model per-request
+    without touching global config (used by per-user model selection).
+    """
+    provider = provider_override or LLM_PROVIDER
+    model = model_override or LLM_MODEL
+
+    if provider == "openrouter":
+        return await _ask_openrouter(messages, system, model=model)
+    elif provider == "anthropic":
+        return await _ask_anthropic(messages, system, model=model)
     else:
-        raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER!r}")
+        raise ValueError(f"Unknown LLM provider: {provider!r}")
 
 
-async def _ask_openrouter(messages: list[dict], system: str) -> str:
+async def _ask_openrouter(messages: list[dict], system: str, *, model: str) -> str:
     from openai import AsyncOpenAI
     from config import OPENROUTER_API_KEY
 
@@ -64,7 +77,8 @@ async def _ask_openrouter(messages: list[dict], system: str) -> str:
 
     try:
         response = await client.chat.completions.create(
-            model=LLM_MODEL,
+            model=model,
+            max_tokens=4096,
             messages=full_messages,
         )
         return response.choices[0].message.content
@@ -73,8 +87,7 @@ async def _ask_openrouter(messages: list[dict], system: str) -> str:
         raise
 
 
-async def _ask_anthropic(messages: list[dict], system: str) -> str:
-    # Conditional import — anthropic SDK may not be installed
+async def _ask_anthropic(messages: list[dict], system: str, *, model: str) -> str:
     try:
         import anthropic
     except ImportError:
@@ -87,7 +100,7 @@ async def _ask_anthropic(messages: list[dict], system: str) -> str:
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
     kwargs = {
-        "model": LLM_MODEL,
+        "model": model,
         "max_tokens": 1024,
         "messages": messages,
     }
