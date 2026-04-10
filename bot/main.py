@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
-import sys
 import os
+import re
+import sys
+from pathlib import Path
 
 # Allow imports from project root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -23,6 +25,8 @@ from utils.model_config import (
     AVAILABLE_MODELS, get_user_model, set_user_model,
 )
 from agents.network import ALL_PRESETS, DEFAULT_PRESET_ID, run_network
+from utils.memory import ensure_user_name, get_memory_context, update_task_history
+from utils.media import transcribe_voice, extract_document, describe_image
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,6 +102,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Команды:\n"
         "/model — выбрать AI-модель\n"
         "/network — выбрать агентную сеть\n\n"
+        "Также можешь отправлять:\n"
+        "🎤 Голосовые сообщения — распознаю и отвечу\n"
+        "📄 Документы (PDF, Excel, DOCX) — извлеку текст\n"
+        "📷 Фотографии — опишу что вижу\n\n"
         "Просто опиши задачу своими словами."
     )
 
@@ -266,6 +274,51 @@ async def _handle_automation(
     return reply
 
 
+_TG_MAX_LENGTH = 4096
+
+
+def _md_to_html(text: str) -> str:
+    """Convert common Markdown to Telegram-compatible HTML."""
+    text = text.replace("&", "&amp;")
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+
+    text = re.sub(r"```\w*\n(.*?)```", r"<pre>\1</pre>", text, flags=re.DOTALL)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text, flags=re.DOTALL)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text, flags=re.DOTALL)
+    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"<i>\1</i>", text, flags=re.DOTALL)
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+
+    return text
+
+
+async def _send_long_message(update: Update, text: str) -> None:
+    """Convert Markdown to HTML, split into <=4096-char chunks and send."""
+    html = _md_to_html(text)
+
+    async def _send_chunk(chunk: str) -> None:
+        try:
+            await update.message.reply_text(chunk, parse_mode="HTML")
+        except Exception:
+            await update.message.reply_text(chunk)
+
+    if len(html) <= _TG_MAX_LENGTH:
+        await _send_chunk(html)
+        return
+    while html:
+        if len(html) <= _TG_MAX_LENGTH:
+            await _send_chunk(html)
+            break
+        split_at = html.rfind("\n", 0, _TG_MAX_LENGTH)
+        if split_at < _TG_MAX_LENGTH // 4:
+            split_at = _TG_MAX_LENGTH
+        chunk = html[:split_at]
+        html = html[split_at:].lstrip("\n")
+        await _send_chunk(chunk)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if _is_duplicate(update):
         return
@@ -273,10 +326,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_message = update.message.text
     history = _get_history(user_id)
 
-    # Show typing indicator immediately
+    ensure_user_name(user_id, update.effective_user.first_name or "")
+
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     ask_kwargs = _get_ask_kwargs(user_id)
+    mem_ctx = get_memory_context(user_id)
 
     try:
         route = await router.classify(user_message, history, ask_kwargs=ask_kwargs)
@@ -290,23 +345,173 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         elif route["type"] == "automation":
             reply = await _handle_automation(user_id, user_message, history, ask_kwargs)
+            update_task_history(user_id, route["intent"])
 
         elif route["type"] == "hybrid":
             qa_reply, auto_reply = await asyncio.gather(
-                qa.answer(user_message, history, ask_kwargs=ask_kwargs),
+                qa.answer(user_message, history, ask_kwargs=ask_kwargs, memory_context=mem_ctx),
                 _handle_automation(user_id, user_message, history, ask_kwargs),
             )
             reply = f"{qa_reply}\n\n---\n{auto_reply}"
+            update_task_history(user_id, route["intent"])
 
         else:  # "qa" — default / fallback
-            reply = await qa.answer(user_message, history, ask_kwargs=ask_kwargs)
+            reply = await qa.answer(user_message, history, ask_kwargs=ask_kwargs, memory_context=mem_ctx)
 
         _update_history(user_id, user_message, reply)
-        await update.message.reply_text(reply)
+        await _send_long_message(update, reply)
 
     except Exception as e:
         logger.error("Processing error for user %s: %s", user_id, e)
         await update.message.reply_text("Произошла ошибка, попробуй ещё раз.")
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Download voice message, transcribe with Whisper, feed into normal pipeline."""
+    if _is_duplicate(update):
+        return
+    user_id = update.effective_user.id
+    ensure_user_name(user_id, update.effective_user.first_name or "")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        voice = update.message.voice or update.message.audio
+        tg_file = await voice.get_file()
+
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = tmp.name
+        await tg_file.download_to_drive(tmp_path)
+
+        await update.message.reply_text("🎤 Распознаю голос...")
+        text = await transcribe_voice(tmp_path)
+
+        import os
+        os.unlink(tmp_path)
+
+        if not text.strip():
+            await update.message.reply_text("Не удалось распознать речь, попробуй ещё раз.")
+            return
+
+        await update.message.reply_text(f"📝 Распознано: {text[:200]}{'...' if len(text) > 200 else ''}")
+
+        ask_kwargs = _get_ask_kwargs(user_id)
+        mem_ctx = get_memory_context(user_id)
+        history = _get_history(user_id)
+
+        route = await router.classify(text, history, ask_kwargs=ask_kwargs)
+        logger.info("Voice route for user %s: %s (%.2f)", user_id, route["type"], route["confidence"])
+
+        if route["type"] == "deep_task":
+            reply = await _handle_deep_task(update, user_id, text, ask_kwargs)
+        elif route["type"] == "automation":
+            reply = await _handle_automation(user_id, text, history, ask_kwargs)
+            update_task_history(user_id, route["intent"])
+        else:
+            reply = await qa.answer(text, history, ask_kwargs=ask_kwargs, memory_context=mem_ctx)
+
+        _update_history(user_id, f"[Голос] {text}", reply)
+        await _send_long_message(update, reply)
+
+    except Exception as e:
+        logger.error("Voice processing error for user %s: %s", user_id, e)
+        await update.message.reply_text("Ошибка обработки голосового сообщения.")
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Download document, extract text, send as context to QA."""
+    if _is_duplicate(update):
+        return
+    user_id = update.effective_user.id
+    ensure_user_name(user_id, update.effective_user.first_name or "")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        doc = update.message.document
+        file_name = doc.file_name or "file"
+        ext = Path(file_name).suffix.lower()
+
+        if ext not in (".pdf", ".xlsx", ".xls", ".docx", ".doc"):
+            await update.message.reply_text(
+                f"Формат {ext} пока не поддерживается. Поддерживаю: PDF, Excel, DOCX."
+            )
+            return
+
+        tg_file = await doc.get_file()
+
+        import tempfile as _tf
+        with _tf.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp_path = tmp.name
+        await tg_file.download_to_drive(tmp_path)
+
+        await update.message.reply_text(f"📄 Извлекаю текст из {file_name}...")
+        text = await extract_document(tmp_path)
+
+        import os
+        os.unlink(tmp_path)
+
+        caption = update.message.caption or ""
+        ask_kwargs = _get_ask_kwargs(user_id)
+        mem_ctx = get_memory_context(user_id)
+
+        if caption:
+            user_prompt = f"{caption}\n\nСодержимое документа ({file_name}):\n{text}"
+        else:
+            user_prompt = f"Пользователь отправил документ ({file_name}). Кратко опиши содержимое и предложи, чем можешь помочь.\n\nСодержимое:\n{text}"
+
+        history = _get_history(user_id)
+        reply = await qa.answer(user_prompt, history, ask_kwargs=ask_kwargs, memory_context=mem_ctx)
+
+        _update_history(user_id, f"[Документ: {file_name}] {caption}", reply)
+        await _send_long_message(update, reply)
+
+    except Exception as e:
+        logger.error("Document processing error for user %s: %s", user_id, e)
+        await update.message.reply_text("Ошибка обработки документа.")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Download photo, describe via vision model."""
+    if _is_duplicate(update):
+        return
+    user_id = update.effective_user.id
+    ensure_user_name(user_id, update.effective_user.first_name or "")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        photo = update.message.photo[-1]  # highest resolution
+        tg_file = await photo.get_file()
+
+        import tempfile as _tf
+        with _tf.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+        await tg_file.download_to_drive(tmp_path)
+
+        await update.message.reply_text("📷 Анализирую изображение...")
+        ask_kwargs = _get_ask_kwargs(user_id)
+        description = await describe_image(tmp_path, ask_kwargs=ask_kwargs)
+
+        import os
+        os.unlink(tmp_path)
+
+        caption = update.message.caption or ""
+        if caption:
+            mem_ctx = get_memory_context(user_id)
+            history = _get_history(user_id)
+            user_prompt = f"{caption}\n\nОписание изображения:\n{description}"
+            reply = await qa.answer(user_prompt, history, ask_kwargs=ask_kwargs, memory_context=mem_ctx)
+        else:
+            reply = description
+
+        history_entry = f"[Пользователь отправил фото. Описание: {description}]"
+        if caption:
+            history_entry += f" Вопрос: {caption}"
+        _update_history(user_id, history_entry, reply)
+        await _send_long_message(update, reply)
+
+    except Exception as e:
+        logger.error("Photo processing error for user %s: %s", user_id, e)
+        await update.message.reply_text("Ошибка обработки изображения.")
 
 
 def main() -> None:
@@ -318,6 +523,9 @@ def main() -> None:
     app.add_handler(CommandHandler("network", cmd_network))
     app.add_handler(CallbackQueryHandler(_handle_model_callback, pattern=r"^model:"))
     app.add_handler(CallbackQueryHandler(_handle_network_callback, pattern=r"^network:"))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot is starting...")

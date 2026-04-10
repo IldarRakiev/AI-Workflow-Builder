@@ -8,8 +8,17 @@ SYSTEM_PROMPT = (
 )
 
 
-async def answer(user_message: str, history: list[dict] = None, ask_kwargs: dict = {}) -> str:
-    """Return an LLM answer for user_message, optionally using prior history."""
+async def answer(
+    user_message: str,
+    history: list[dict] = None,
+    ask_kwargs: dict = {},
+    memory_context: str = "",
+) -> str:
+    """Return an LLM answer, optionally enriched with user memory context."""
+    system = SYSTEM_PROMPT
+    if memory_context:
+        system = f"{memory_context}\n\n{SYSTEM_PROMPT}"
+
     messages = list(history) if history else []
     messages.append({"role": "user", "content": user_message})
-    return await ask(messages, system=SYSTEM_PROMPT, **ask_kwargs)
+    return await ask(messages, system=system, **ask_kwargs)
