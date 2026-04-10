@@ -47,3 +47,37 @@ async def activate(workflow_id: str) -> bool:
     except Exception as e:
         logger.error("n8n activate failed for %s: %s", workflow_id, e)
         return False
+
+
+async def deactivate(workflow_id: str) -> bool:
+    """Deactivate a workflow by ID. Returns True on success."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.patch(
+                f"{N8N_BASE_URL}/api/v1/workflows/{workflow_id}",
+                json={"active": False},
+                headers=_HEADERS,
+            )
+            r.raise_for_status()
+            return True
+    except Exception as e:
+        logger.error("n8n deactivate failed for %s: %s", workflow_id, e)
+        return False
+
+
+async def list_workflows() -> list[dict]:
+    """Return list of all workflows from n8n. Returns [] on error."""
+    if not N8N_BASE_URL:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{N8N_BASE_URL}/api/v1/workflows",
+                headers=_HEADERS,
+            )
+            r.raise_for_status()
+            data = r.json()
+            return data.get("data", data) if isinstance(data, dict) else data
+    except Exception as e:
+        logger.error("n8n list_workflows failed: %s", e)
+        return []

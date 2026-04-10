@@ -44,29 +44,48 @@ async def ask(
     *,
     model_override: str | None = None,
     provider_override: str | None = None,
+    user_api_key: str | None = None,
 ) -> str:
     """Send messages to the configured LLM and return the assistant's text reply.
 
-    model_override / provider_override let callers switch model per-request
-    without touching global config (used by per-user model selection).
+    model_override / provider_override let callers switch model per-request.
+    user_api_key: per-user OpenRouter key; falls back to system key on quota errors.
     """
     provider = provider_override or LLM_PROVIDER
     model = model_override or LLM_MODEL
 
     if provider == "openrouter":
-        return await _ask_openrouter(messages, system, model=model)
+        try:
+            return await _ask_openrouter(messages, system, model=model, api_key=user_api_key)
+        except Exception as e:
+            # Fallback on quota / auth errors (HTTP 402, 401, 429)
+            if user_api_key and _is_quota_error(e):
+                from config import FALLBACK_API_KEY, FALLBACK_MODEL
+                logger.info("User key quota exhausted — switching to fallback model")
+                return await _ask_openrouter(
+                    messages, system, model=FALLBACK_MODEL, api_key=FALLBACK_API_KEY or None
+                )
+            raise
     elif provider == "anthropic":
         return await _ask_anthropic(messages, system, model=model)
     else:
         raise ValueError(f"Unknown LLM provider: {provider!r}")
 
 
-async def _ask_openrouter(messages: list[dict], system: str, *, model: str) -> str:
+def _is_quota_error(exc: Exception) -> bool:
+    """Return True if the exception looks like a quota / billing error."""
+    msg = str(exc).lower()
+    return any(code in msg for code in ("402", "quota", "insufficient", "billing", "limit"))
+
+
+async def _ask_openrouter(
+    messages: list[dict], system: str, *, model: str, api_key: str | None = None
+) -> str:
     from openai import AsyncOpenAI
     from config import OPENROUTER_API_KEY
 
     client = AsyncOpenAI(
-        api_key=OPENROUTER_API_KEY,
+        api_key=api_key or OPENROUTER_API_KEY,
         base_url="https://openrouter.ai/api/v1",
     )
 

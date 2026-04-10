@@ -22,3 +22,11 @@ if LLM_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
 # n8n integration — optional, bot works without it
 N8N_BASE_URL = os.getenv("N8N_BASE_URL", "").rstrip("/")
 N8N_API_KEY = os.getenv("N8N_API_KEY", "")
+
+# Billing — optional, bot works without it (billing commands won't be available)
+OPENROUTER_ADMIN_KEY = os.getenv("OPENROUTER_ADMIN_KEY", "")  # sk_or_mgmt_... key
+FALLBACK_API_KEY = os.getenv("FALLBACK_API_KEY", "")           # cheap key for fallback
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "openai/gpt-4o-mini")
+PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")  # from BotFather → Payments → ЮKassa
+RUB_PER_USD = float(os.getenv("RUB_PER_USD", "95.0"))          # exchange rate for on-demand top-ups
+LLM_SHARE = float(os.getenv("LLM_SHARE", "0.77"))              # fraction of gross that goes to LLM (covers ЮKassa ~3% + 20% margin)
